@@ -1,16 +1,53 @@
 // src/utils/accurate.js
 // Accurate Online API client
+// Auth: Bearer Token + HMAC-SHA256 Signature (X-Api-Timestamp + X-Api-Signature)
 
 const axios = require('axios')
+const crypto = require('crypto')
+
+const BASE_URL = process.env.ACCURATE_BASE_URL || 'https://zeus.accurate.id'
+
+/**
+ * Generate HMAC-SHA256 signature untuk setiap request
+ * Message = ISO timestamp saat request
+ */
+function buildAccurateHeaders() {
+  const bearerToken = process.env.ACCURATE_BEARER_TOKEN || process.env.ACCURATE_ACCESS_TOKEN
+  const secretKey = process.env.ACCURATE_SECRET_KEY || process.env.ACCURATE_SIGNATURE_SECRET
+
+  if (!bearerToken) {
+    throw new Error('ACCURATE_BEARER_TOKEN / ACCURATE_ACCESS_TOKEN tidak disetting di environment!')
+  }
+
+  const headers = {
+    'Authorization': `Bearer ${bearerToken}`,
+    'Content-Type': 'application/json',
+  }
+
+  if (secretKey) {
+    const ts = new Date().toISOString()
+    const signature = crypto
+      .createHmac('sha256', secretKey)
+      .update(ts)
+      .digest('base64')
+
+    headers['X-Api-Timestamp'] = ts
+    headers['X-Api-Signature'] = signature
+  }
+
+  return headers
+}
 
 const accurateClient = axios.create({
-  baseURL: process.env.ACCURATE_BASE_URL || 'https://account.accurate.id',
-  headers: {
-    'X-SESSION-ID': process.env.ACCURATE_SESSION,
-    'X-Api-Database-Id': process.env.ACCURATE_DB_ID,
-    'Content-Type': 'application/json',
-  },
-  timeout: 30000,
+  baseURL: BASE_URL,
+  timeout: 35000,
+})
+
+// Inject auth headers setiap request (fresh timestamp + signature tiap call)
+accurateClient.interceptors.request.use((config) => {
+  const authHeaders = buildAccurateHeaders()
+  config.headers = { ...config.headers, ...authHeaders }
+  return config
 })
 
 // Retry dengan exponential backoff jika rate limit (429) atau server error
@@ -32,17 +69,34 @@ accurateClient.interceptors.response.use(
 )
 
 /**
+ * Helper to convert YYYY-MM-DD to DD/MM/YYYY for Accurate API filters
+ */
+function toAccurateDateFormat(dateStr) {
+  if (!dateStr) return null
+  if (dateStr.includes('/')) return dateStr
+  const parts = dateStr.split('-')
+  if (parts.length === 3) {
+    return `${parts[2]}/${parts[1]}/${parts[0]}`
+  }
+  return dateStr
+}
+
+/**
  * Ambil list HPO (Purchase Order) dari Accurate
  */
-async function fetchHPOList({ page = 1, pageSize = 50, fromDate = null } = {}) {
+async function fetchHPOList({ page = 1, pageSize = 50, fromDate = null, keywords = null } = {}) {
   const params = {
-    page,
-    pageSize,
-    'filter.draftStatus': 'POSTED',
-    'sp.sort': 'transDate',
-    'sp.dir': 'DESC',
+    'fields': 'id,number,transDate,statusName,vendor,totalAmount,currency',
+    'sp.page': page,
+    'sp.pageSize': pageSize,
+    'sp.sort': 'transDate|desc',
   }
-  if (fromDate) params['filter.transDateFrom'] = fromDate
+  if (fromDate) {
+    params['filter.transDateFrom'] = toAccurateDateFormat(fromDate)
+  }
+  if (keywords) {
+    params['keywords'] = keywords
+  }
 
   const res = await accurateClient.get('/accurate/api/purchase-order/list.do', { params })
   return res.data
@@ -61,14 +115,19 @@ async function fetchHPODetail(id) {
 /**
  * Ambil list HRI (Receive Item / Penerimaan Barang) dari Accurate
  */
-async function fetchHRIList({ page = 1, pageSize = 50, fromDate = null } = {}) {
+async function fetchHRIList({ page = 1, pageSize = 50, fromDate = null, keywords = null } = {}) {
   const params = {
-    page,
-    pageSize,
-    'sp.sort': 'transDate',
-    'sp.dir': 'DESC',
+    'fields': 'id,number,transDate,statusName',
+    'sp.page': page,
+    'sp.pageSize': pageSize,
+    'sp.sort': 'transDate|desc',
   }
-  if (fromDate) params['filter.transDateFrom'] = fromDate
+  if (fromDate) {
+    params['filter.transDateFrom'] = toAccurateDateFormat(fromDate)
+  }
+  if (keywords) {
+    params['keywords'] = keywords
+  }
 
   const res = await accurateClient.get('/accurate/api/receive-item/list.do', { params })
   return res.data
@@ -87,14 +146,19 @@ async function fetchHRIDetail(id) {
 /**
  * Ambil list HDO (Delivery Order / Surat Jalan) dari Accurate
  */
-async function fetchHDOList({ page = 1, pageSize = 50, fromDate = null } = {}) {
+async function fetchHDOList({ page = 1, pageSize = 50, fromDate = null, keywords = null } = {}) {
   const params = {
-    page,
-    pageSize,
-    'sp.sort': 'transDate',
-    'sp.dir': 'DESC',
+    'fields': 'id,number,transDate,statusName,customer,shipTo,driverName',
+    'sp.page': page,
+    'sp.pageSize': pageSize,
+    'sp.sort': 'transDate|desc',
   }
-  if (fromDate) params['filter.transDateFrom'] = fromDate
+  if (fromDate) {
+    params['filter.transDateFrom'] = toAccurateDateFormat(fromDate)
+  }
+  if (keywords) {
+    params['keywords'] = keywords
+  }
 
   const res = await accurateClient.get('/accurate/api/delivery-order/list.do', { params })
   return res.data
@@ -117,4 +181,5 @@ module.exports = {
   fetchHRIDetail,
   fetchHDOList,
   fetchHDODetail,
+  toAccurateDateFormat,
 }

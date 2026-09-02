@@ -1,15 +1,16 @@
-// src/index.js — Entry point HSO Accurate Webhook Server
+// src/index.js — Entry point HSO Accurate Background Sync Engine
 require('dotenv').config()
 
 const express = require('express')
 const cors = require('cors')
 const cron = require('node-cron')
 
-const webhookRoutes = require('./routes/webhook')
+const dashboardRoutes = require('./routes/dashboard')
 const syncRoutes = require('./routes/sync')
 const { fullSyncHPO } = require('./services/syncHPO')
 const { fullSyncHRI } = require('./services/syncHRI')
 const { fullSyncHDO } = require('./services/syncHDO')
+const syncTracker = require('./utils/syncTracker')
 
 const app = express()
 const PORT = process.env.PORT || 3001
@@ -17,13 +18,13 @@ const PORT = process.env.PORT || 3001
 // ===========================
 // Middleware
 // ===========================
-app.use(cors())
-app.use(express.json({ limit: '5mb' }))
+app.use(cors({ origin: '*' }))
+app.use(express.json({ limit: '10mb' }))
 app.use(express.urlencoded({ extended: true }))
 
 // Request logger
 app.use((req, res, next) => {
-  if (req.path !== '/health') {
+  if (req.path !== '/health' && req.path !== '/sync/status' && req.path !== '/sync/logs') {
     console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`)
   }
   next()
@@ -32,73 +33,141 @@ app.use((req, res, next) => {
 // ===========================
 // Routes
 // ===========================
+app.use('/', dashboardRoutes)
+app.use('/sync', syncRoutes)
+
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
-    service: 'hso-accurate-webhook',
+    service: 'hso-accurate-sync',
     timestamp: new Date().toISOString(),
+    uptimeSeconds: Math.floor(process.uptime()),
+    syncStatus: syncTracker.getStatus(),
   })
 })
-
-app.use('/webhook', webhookRoutes)
-app.use('/sync', syncRoutes)
 
 // 404 handler
 app.use((req, res) => {
   res.status(404).json({ error: `Route ${req.path} tidak ditemukan` })
 })
 
-// Error handler
+// Global Error handler
 app.use((err, req, res, next) => {
-  console.error('💥 Unhandled error:', err.message)
-  res.status(500).json({ error: 'Internal server error' })
+  console.error('💥 Unhandled server error:', err.message)
+  res.status(500).json({ error: 'Internal server error', details: err.message })
 })
 
 // ===========================
-// Cron Jobs — Auto Sync
+// Cron Jobs — Scheduled Sync
 // ===========================
 
-// Setiap 1 jam: sync HRI (prioritas — update hokiindo_date)
+// ── 1. DELTA SYNC (Tiap 5 Menit) ──────────────────────────────────────────
+// Mengambil transaksi yang dibuat / diupdate hari ini (cepat & ringan)
+cron.schedule('*/5 * * * *', async () => {
+  if (syncTracker.isSyncing) {
+    console.log('⏳ [DELTA] Sync sebelumnya masih berjalan, lewati putaran ini...')
+    return
+  }
+
+  const logId = syncTracker.logStart('DELTA_5M', 'ALL')
+  const today = new Date().toISOString().split('T')[0]
+  console.log(`\n⚡ [DELTA] Sync 5-menit dimulai (${today})...`)
+
+  try {
+    // 1. Sync HRI (update status shipments di HSO)
+    const hriRes = await fullSyncHRI(1, today)
+
+    // 2. Sync HPO (update purchase orders)
+    await new Promise(r => setTimeout(r, 2000))
+    const hpoRes = await fullSyncHPO(1, today)
+
+    // 3. Sync HDO (update surat jalan)
+    await new Promise(r => setTimeout(r, 2000))
+    const hdoRes = await fullSyncHDO(1, today)
+
+    const totalProcessed = (hriRes.processed || 0) + (hpoRes.processed || 0) + (hdoRes.processed || 0)
+    const totalUpdated = (hriRes.updated || 0) + (hpoRes.updated || 0) + (hdoRes.updated || 0)
+
+    syncTracker.logEnd(logId, {
+      processed: totalProcessed,
+      updated: totalUpdated,
+      shipmentsUpdated: hriRes.shipmentsUpdated || 0,
+      errors: [...(hriRes.errors || []), ...(hpoRes.errors || []), ...(hdoRes.errors || [])],
+    })
+
+    console.log(`⚡ [DELTA] Sync 5-menit selesai! (${totalProcessed} doc, ${hriRes.shipmentsUpdated || 0} shipments updated)`)
+  } catch (err) {
+    console.error('❌ [DELTA] Sync error:', err.message)
+    syncTracker.logEnd(logId, { error: err.message, processed: 0, updated: 0 })
+  }
+})
+
+// ── 2. HOURLY SYNC (Tiap 1 Jam) ───────────────────────────────────────────
+// Safety net: sync data 2 hari terakhir untuk antisipasi delay posting
 cron.schedule('0 * * * *', async () => {
-  console.log('\n⏰ [CRON] Hourly sync HRI dimulai...')
+  const logId = syncTracker.logStart('HOURLY', 'HRI')
+  console.log('\n⏰ [HOURLY] Sync HRI (2 hari terakhir) dimulai...')
   try {
-    await fullSyncHRI(2) // 2 hari ke belakang untuk efisiensi
+    const res = await fullSyncHRI(2)
+    syncTracker.logEnd(logId, res)
   } catch (err) {
-    console.error('❌ [CRON] HRI sync error:', err.message)
+    console.error('❌ [HOURLY] HRI error:', err.message)
+    syncTracker.logEnd(logId, { error: err.message })
   }
 })
 
-// Setiap 1 jam (offset 15 menit): sync HPO
 cron.schedule('15 * * * *', async () => {
-  console.log('\n⏰ [CRON] Hourly sync HPO dimulai...')
+  const logId = syncTracker.logStart('HOURLY', 'HPO')
+  console.log('\n⏰ [HOURLY] Sync HPO (2 hari terakhir) dimulai...')
   try {
-    await fullSyncHPO(2)
+    const res = await fullSyncHPO(2)
+    syncTracker.logEnd(logId, res)
   } catch (err) {
-    console.error('❌ [CRON] HPO sync error:', err.message)
+    console.error('❌ [HOURLY] HPO error:', err.message)
+    syncTracker.logEnd(logId, { error: err.message })
   }
 })
 
-// Setiap 1 jam (offset 30 menit): sync HDO
 cron.schedule('30 * * * *', async () => {
-  console.log('\n⏰ [CRON] Hourly sync HDO dimulai...')
+  const logId = syncTracker.logStart('HOURLY', 'HDO')
+  console.log('\n⏰ [HOURLY] Sync HDO (2 hari terakhir) dimulai...')
   try {
-    await fullSyncHDO(2)
+    const res = await fullSyncHDO(2)
+    syncTracker.logEnd(logId, res)
   } catch (err) {
-    console.error('❌ [CRON] HDO sync error:', err.message)
+    console.error('❌ [HOURLY] HDO error:', err.message)
+    syncTracker.logEnd(logId, { error: err.message })
   }
 })
 
-// Setiap hari jam 02:00: full sync 30 hari (deep sync malam hari)
+// ── 3. NIGHTLY DEEP SYNC (Tiap Hari Jam 02:00) ───────────────────────────
+// Deep sync 30 hari data historis
 cron.schedule('0 2 * * *', async () => {
-  const days = parseInt(process.env.SYNC_DAYS_BACK) || 30
-  console.log(`\n🌙 [CRON] Nightly deep sync (${days} hari) dimulai...`)
+  const days = parseInt(process.env.SYNC_DAYS_BACK, 10) || 30
+  const logId = syncTracker.logStart('NIGHTLY_DEEP', 'ALL')
+  console.log(`\n🌙 [DEEP] Nightly deep sync (${days} hari) dimulai...`)
+
   try {
-    await fullSyncHPO(days)
-    await fullSyncHRI(days)
-    await fullSyncHDO(days)
-    console.log('\n✅ [CRON] Nightly deep sync selesai!')
+    const hriRes = await fullSyncHRI(days)
+    await new Promise(r => setTimeout(r, 5000))
+    const hpoRes = await fullSyncHPO(days)
+    await new Promise(r => setTimeout(r, 5000))
+    const hdoRes = await fullSyncHDO(days)
+
+    const totalProcessed = (hriRes.processed || 0) + (hpoRes.processed || 0) + (hdoRes.processed || 0)
+    const totalUpdated = (hriRes.updated || 0) + (hpoRes.updated || 0) + (hdoRes.updated || 0)
+
+    syncTracker.logEnd(logId, {
+      processed: totalProcessed,
+      updated: totalUpdated,
+      shipmentsUpdated: hriRes.shipmentsUpdated || 0,
+      errors: [...(hriRes.errors || []), ...(hpoRes.errors || []), ...(hdoRes.errors || [])],
+    })
+
+    console.log(`\n✅ [DEEP] Nightly deep sync selesai (${totalProcessed} dokumen)!`)
   } catch (err) {
-    console.error('❌ [CRON] Nightly sync error:', err.message)
+    console.error('❌ [DEEP] Nightly sync error:', err.message)
+    syncTracker.logEnd(logId, { error: err.message, processed: 0, updated: 0 })
   }
 })
 
@@ -107,21 +176,22 @@ cron.schedule('0 2 * * *', async () => {
 // ===========================
 app.listen(PORT, () => {
   console.log(`
-╔════════════════════════════════════════╗
-║   HSO Accurate Webhook Server          ║
-║   Port: ${PORT}                           ║
-╠════════════════════════════════════════╣
-║   POST /webhook/accurate  ← dari Accurate
-║   POST /webhook/hpo/:id   ← manual HPO
-║   POST /webhook/hri/:id   ← manual HRI
-║   POST /webhook/hdo/:id   ← manual HDO
-║   POST /sync/all          ← full sync
-║   GET  /health            ← status check
-╠════════════════════════════════════════╣
-║   Cron: HRI tiap jam (menit 0)         ║
-║   Cron: HPO tiap jam (menit 15)        ║
-║   Cron: HDO tiap jam (menit 30)        ║
-║   Cron: Deep sync tiap hari jam 02:00  ║
-╚════════════════════════════════════════╝
+╔══════════════════════════════════════════════════════════╗
+║         HSO ACCURATE SYNC ENGINE RUNNING                 ║
+║         Port: ${PORT}                                         ║
+╠══════════════════════════════════════════════════════════╣
+║  🌐 Web Dashboard  : http://localhost:${PORT}/               ║
+║  ⚡ Delta Sync URL : http://localhost:${PORT}/sync/delta      ║
+║  🚀 Full Sync URL  : http://localhost:${PORT}/sync/all        ║
+║  📦 Sync HRI URL   : http://localhost:${PORT}/sync/hri        ║
+║  📑 Sync HPO URL   : http://localhost:${PORT}/sync/hpo        ║
+║  🚚 Sync HDO URL   : http://localhost:${PORT}/sync/hdo        ║
+║  📊 Live Logs API  : http://localhost:${PORT}/sync/logs       ║
+║  💓 Health Check   : http://localhost:${PORT}/health          ║
+╠══════════════════════════════════════════════════════════╣
+║  ⏰ Cron Delta Sync : Setiap 5 Menit                     ║
+║  ⏰ Cron Hourly     : Setiap 1 Jam (Staggered)           ║
+║  ⏰ Cron Deep Sync  : Setiap Hari Jam 02:00 (30 Hari)    ║
+╚══════════════════════════════════════════════════════════╝
   `)
 })
