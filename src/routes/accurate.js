@@ -823,4 +823,52 @@ router.post(['/create-spa', '/accurate-create-spa'], requireProxyKey, async (req
   }
 })
 
+// ─── 14. SYNC ACCURATE DELIVERY ORDERS (DOs) ─────────────────────────────────
+router.all(['/sync-accurate-dos', '/sync-dos'], requireProxyKey, async (req, res) => {
+  const { fullSyncHDO } = require('../services/syncHDO')
+  try {
+    const result = await fullSyncHDO(15)
+    return res.json({ success: true, processed: result?.processed || 0, hasMore: false, errors: result?.errors || [] })
+  } catch (err) {
+    return res.json({ success: false, error: err.message, processed: 0, hasMore: false })
+  }
+})
+
+// ─── 15. SYNC ACCURATE RECEIVE ITEMS (HRI) ──────────────────────────────────
+router.all(['/sync-accurate-receive-items', '/sync-receive-items'], requireProxyKey, async (req, res) => {
+  const { fullSyncHRI } = require('../services/syncHRI')
+  try {
+    const result = await fullSyncHRI(15)
+    return res.json({ success: true, processed: result?.processed || 0, hasMore: false, errors: result?.errors || [] })
+  } catch (err) {
+    return res.json({ success: false, error: err.message, processed: 0, hasMore: false })
+  }
+})
+
+// ─── 16. SYNC ACCURATE PURCHASE ORDERS (HPO) ────────────────────────────────
+router.all(['/sync-accurate-pos', '/sync-pos'], requireProxyKey, async (req, res) => {
+  const { fullSyncHPO } = require('../services/syncHPO')
+  try {
+    const result = await fullSyncHPO(15)
+    return res.json({ success: true, processed: result?.processed || 0, hasMore: false, errors: result?.errors || [] })
+  } catch (err) {
+    return res.json({ success: false, error: err.message, processed: 0, hasMore: false })
+  }
+})
+
+// ─── 17. SYNC ACCURATE PO SINGLE ────────────────────────────────────────────
+router.all(['/sync-accurate-po-single', '/sync-po-single'], requireProxyKey, async (req, res) => {
+  const { poId } = req.body || req.query || {}
+  const { fetchHPODetail } = require('../utils/accurate')
+  const { upsertHPO } = require('../services/syncHPO')
+  try {
+    if (!poId) return res.json({ success: false, error: 'poId wajib dikirim' })
+    const detail = await fetchHPODetail(Number(poId))
+    const result = await upsertHPO(detail)
+    return res.json({ success: true, ...result })
+  } catch (err) {
+    return res.json({ success: false, error: err.message })
+  }
+})
+
 module.exports = router
