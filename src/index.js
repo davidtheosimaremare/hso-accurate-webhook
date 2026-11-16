@@ -7,6 +7,7 @@ const cron = require('node-cron')
 
 const dashboardRoutes = require('./routes/dashboard')
 const syncRoutes = require('./routes/sync')
+const accurateRoutes = require('./routes/accurate')
 const { fullSyncHPO } = require('./services/syncHPO')
 const { fullSyncHRI } = require('./services/syncHRI')
 const { fullSyncHDO } = require('./services/syncHDO')
@@ -35,6 +36,7 @@ app.use((req, res, next) => {
 // ===========================
 app.use('/', dashboardRoutes)
 app.use('/sync', syncRoutes)
+app.use('/accurate', accurateRoutes)
 
 app.get('/health', (req, res) => {
   res.json({
