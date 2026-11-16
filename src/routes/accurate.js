@@ -871,4 +871,33 @@ router.all(['/sync-accurate-po-single', '/sync-po-single'], requireProxyKey, asy
   }
 })
 
+// ─── 18. SYNC ACCURATE ITEMS ────────────────────────────────────────────────
+router.all(['/sync-accurate-items', '/sync-items'], requireProxyKey, async (req, res) => {
+  const { page = 1 } = req.body || req.query || {}
+  try {
+    const headers = buildHeaders()
+    const url = `${BASE_API}/accurate/api/item/list.do?fields=id,no,name,unitPrice,quantity,availableToSell,itemType&sp.page=${page}&sp.pageSize=100&sp.sort=no|asc`
+    const r = await axios.get(url, { headers, timeout: 20000 })
+    const items = r.data?.d || []
+
+    if (items.length > 0) {
+      const nowIso = new Date().toISOString()
+      const upsertRows = items.map(it => ({
+        id: it.id,
+        item_no: it.no,
+        name: it.name,
+        unit_price: Number(it.unitPrice || 0),
+        quantity: Number(it.quantity || 0),
+        available_to_sell: Number(it.availableToSell !== undefined ? it.availableToSell : it.quantity || 0),
+        updated_at: nowIso
+      }))
+      await supabase.from('accurate_items').upsert(upsertRows, { onConflict: 'item_no' })
+    }
+
+    return res.json({ success: true, processed: items.length, hasMore: items.length >= 100 })
+  } catch (err) {
+    return res.json({ success: false, error: err.message, processed: 0 })
+  }
+})
+
 module.exports = router
