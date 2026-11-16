@@ -177,7 +177,7 @@ router.post(['/list-so', '/accurate-list-so'], requireProxyKey, async (req, res)
 router.post(['/list-sq', '/accurate-list-sq'], requireProxyKey, async (req, res) => {
   const {
     fields = 'id,number,transDate,customer,totalAmount,statusName',
-    limit = 500,
+    limit = 3000,
     sort = 'transDate|desc',
     filterNumber = null,
   } = req.body || {}
@@ -186,6 +186,7 @@ router.post(['/list-sq', '/accurate-list-sq'], requireProxyKey, async (req, res)
     let allData = []
     let page = 1
     const pageSize = 100
+    const maxPages = Math.min(Math.ceil(Number(limit) / pageSize) || 30, 50)
     let hasMore = true
 
     while (hasMore) {
@@ -200,7 +201,7 @@ router.post(['/list-sq', '/accurate-list-sq'], requireProxyKey, async (req, res)
 
         if (json?.d && Array.isArray(json.d)) {
           allData = allData.concat(json.d)
-          if (filterNumber || allData.length >= limit || json.d.length < pageSize || page >= 10) {
+          if (filterNumber || allData.length >= limit || json.d.length < pageSize || page >= maxPages) {
             hasMore = false
             if (allData.length > limit) allData = allData.slice(0, limit)
           } else {
