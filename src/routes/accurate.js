@@ -49,11 +49,11 @@ function requireProxyKey(req, res, next) {
   next()
 }
 
-// ─── 1. DETAIL SALES ORDER / DOKUMEN ─────────────────────────────────────────
-// POST /accurate/detail-so atau POST /accurate/accurate-detail-so
-router.post(['/detail-so', '/accurate-detail-so'], requireProxyKey, async (req, res) => {
+// ─── 1. DETAIL SALES ORDER / SALES QUOTATION / DOKUMEN ────────────────────────
+// POST /accurate/detail-so, /detail-sq, /accurate-detail-so, /accurate-detail-sq
+router.post(['/detail-so', '/accurate-detail-so', '/detail-sq', '/accurate-detail-sq'], requireProxyKey, async (req, res) => {
   const { id, type } = req.body || {}
-  const moduleType = type || 'sales-order'
+  const moduleType = (req.path.includes('sq') ? 'sales-quotation' : null) || type || 'sales-order'
 
   if (!id) {
     return res.json({ s: false, error: 'ID wajib dikirim!' })
@@ -897,6 +897,224 @@ router.all(['/sync-accurate-items', '/sync-items'], requireProxyKey, async (req,
     return res.json({ success: true, processed: items.length, hasMore: items.length >= 100 })
   } catch (err) {
     return res.json({ success: false, error: err.message, processed: 0 })
+  }
+})
+
+// ─── 19. GET NEXT HSO NUMBER ────────────────────────────────────────────────
+router.post(['/get-next-hso-number', '/next-hso-number'], requireProxyKey, async (req, res) => {
+  try {
+    const headers = buildHeaders()
+    const now = new Date()
+    const year2 = String(now.getFullYear()).slice(-2)
+    const month = String(now.getMonth() + 1).padStart(2, '0')
+
+    const listUrl = `${BASE_API}/accurate/api/sales-order/list.do?fields=number,transDate&sp.pageSize=100&sp.sort=number|desc`
+    const r = await axios.get(listUrl, { headers, timeout: 15000 })
+    const soList = r.data?.d || []
+
+    let lastNum = 0
+    let paddingLength = 4
+
+    for (const so of soList) {
+      const num = String(so.number || '').trim().toUpperCase()
+      const m = num.match(new RegExp(`^HSO[\\/\\-](${year2})[\\/\\-](${month})[\\/\\-](\\d+)$`, 'i'))
+      if (m) {
+        const seq = parseInt(m[3], 10)
+        if (seq > lastNum) {
+          lastNum = seq
+          paddingLength = Math.max(paddingLength, m[3].length)
+        }
+      }
+    }
+
+    const nextSeq = lastNum + 1
+    const seqStr = String(nextSeq).padStart(paddingLength, '0')
+    const proposedNumber = `HSO/${year2}/${month}/${seqStr}`
+
+    return res.json({ s: true, proposedNumber, nextSeq })
+  } catch (err) {
+    console.error('[get-next-hso-number] Error:', err.message)
+    return res.json({ s: false, error: err.message })
+  }
+})
+
+// ─── 20. CONVERT HSB TO HSO (FULL OR PARTIAL SPLIT) ─────────────────────────
+router.post(['/convert-hsb-to-hso'], requireProxyKey, async (req, res) => {
+  const {
+    hsbId,
+    hsbNumber,
+    hsoNumber,
+    poNumber,
+    poDate,
+    customerNo,
+    selectedItems = [],
+    remainingItems = [],
+    isFullConversion = false,
+    convertedBy = 'User'
+  } = req.body || {}
+
+  if (!hsbId && !hsbNumber) {
+    return res.json({ s: false, error: 'hsbId atau hsbNumber wajib dikirim!' })
+  }
+  if (!hsoNumber) {
+    return res.json({ s: false, error: 'Nomor HSO baru wajib ditentukan!' })
+  }
+  if (!poNumber) {
+    return res.json({ s: false, error: 'Nomor PO Customer wajib diisi!' })
+  }
+  if (!selectedItems || selectedItems.length === 0) {
+    return res.json({ s: false, error: 'Minimal 1 item harus dipilih untuk di-PO oleh customer!' })
+  }
+
+  try {
+    const headers = buildHeaders()
+    const now = new Date()
+    const nowFormatted = `${String(now.getDate()).padStart(2, '0')}/${String(now.getMonth() + 1).padStart(2, '0')}/${now.getFullYear()}`
+    const transDateStr = poDate ? (poDate.includes('-') ? poDate.split('-').reverse().join('/') : poDate) : nowFormatted
+
+    let finalHsoId = null
+    let resultMessage = ''
+
+    if (isFullConversion || remainingItems.length === 0) {
+      // ─── A. FULL CONVERSION (HSB bertransformasi langsung jadi HSO) ───
+      const updatePayload = {
+        id: Number(hsbId),
+        number: hsoNumber,
+        poNumber: poNumber,
+        transDate: transDateStr,
+        description: `Realisasi penuh dari Booking ${hsbNumber}. PO Customer: ${poNumber}`,
+        detailItem: selectedItems.map((item) => ({
+          itemNo: item.itemNo || item.item_code,
+          quantity: Number(item.quantity || item.qty || 1),
+          unitPrice: Number(item.unitPrice || item.price || 0),
+          detailNotes: item.detailNotes || ''
+        }))
+      }
+
+      const saveUrl = `${BASE_API}/accurate/api/sales-order/save.do`
+      const saveRes = await axios.post(saveUrl, updatePayload, { headers, timeout: 30000 })
+      const resData = saveRes.data
+
+      if (!resData.s) {
+        return res.json({ s: false, error: resData.d || resData.error || 'Gagal mengubah HSB menjadi HSO di Accurate' })
+      }
+
+      finalHsoId = resData.r?.id || hsbId
+      resultMessage = `Dokumen ${hsbNumber} berhasil dikonversi penuh menjadi ${hsoNumber}!`
+
+      // Log ke Supabase
+      try {
+        await supabase.from('hsb_conversions').insert({
+          hsb_id: String(hsbId),
+          hsb_number: hsbNumber,
+          hso_number: hsoNumber,
+          hso_id: String(finalHsoId),
+          po_number: poNumber,
+          conversion_type: 'FULL',
+          selected_items: selectedItems,
+          remaining_items: [],
+          converted_by: convertedBy
+        })
+      } catch (dbErr) {
+        console.warn('[convert-hsb-to-hso] Log notice:', dbErr.message)
+      }
+
+      return res.json({
+        s: true,
+        message: resultMessage,
+        conversionType: 'FULL',
+        hsoNumber,
+        hsoId: finalHsoId
+      })
+
+    } else {
+      // ─── B. PARTIAL CONVERSION (Pecah Booking: Buat HSO Baru + Potong HSB) ───
+      // 1. Buat HSO Baru untuk item-item yang terpilih
+      const createHsoPayload = {
+        number: hsoNumber,
+        customerNo: customerNo,
+        poNumber: poNumber,
+        transDate: transDateStr,
+        description: `Pecahan realisasi dari Booking ${hsbNumber}. PO Customer: ${poNumber}`,
+        detailItem: selectedItems.map((item) => ({
+          itemNo: item.itemNo || item.item_code,
+          quantity: Number(item.quantity || item.qty || 1),
+          unitPrice: Number(item.unitPrice || item.price || 0),
+          detailNotes: item.detailNotes || ''
+        }))
+      }
+
+      const createUrl = `${BASE_API}/accurate/api/sales-order/save.do`
+      const createRes = await axios.post(createUrl, createHsoPayload, { headers, timeout: 30000 })
+      const createData = createRes.data
+
+      if (!createData.s) {
+        return res.json({ s: false, error: createData.d || createData.error || 'Gagal membuat HSO baru di Accurate' })
+      }
+
+      finalHsoId = createData.r?.id
+
+      // 2. Update HSB Lama dengan sisa item yang belum di-PO
+      try {
+        const updateHsbPayload = {
+          id: Number(hsbId),
+          description: `Sisa booking setelah dipecah ke ${hsoNumber} (Ref PO: ${poNumber})`,
+          detailItem: remainingItems.map((item) => ({
+            itemNo: item.itemNo || item.item_code,
+            quantity: Number(item.quantity || item.qty || 1),
+            unitPrice: Number(item.unitPrice || item.price || 0),
+            detailNotes: item.detailNotes || ''
+          }))
+        }
+        await axios.post(createUrl, updateHsbPayload, { headers, timeout: 30000 })
+      } catch (hsbUpdateErr) {
+        console.warn('[convert-hsb-to-hso] Warning updating remaining HSB items:', hsbUpdateErr.message)
+      }
+
+      // 3. Pindahkan link shipment/tracking di Supabase untuk item terpilih ke HSO baru
+      try {
+        const selectedCodes = selectedItems.map(i => (i.itemNo || i.item_code || '').trim().toUpperCase()).filter(Boolean)
+        if (selectedCodes.length > 0 && finalHsoId) {
+          await supabase
+            .from('shipments')
+            .update({ so_id: String(finalHsoId) })
+            .eq('so_id', String(hsbId))
+            .in('item_code', selectedCodes)
+        }
+      } catch (shipErr) {
+        console.warn('[convert-hsb-to-hso] Shipment relink notice:', shipErr.message)
+      }
+
+      // 4. Log ke Supabase
+      try {
+        await supabase.from('hsb_conversions').insert({
+          hsb_id: String(hsbId),
+          hsb_number: hsbNumber,
+          hso_number: hsoNumber,
+          hso_id: String(finalHsoId),
+          po_number: poNumber,
+          conversion_type: 'PARTIAL',
+          selected_items: selectedItems,
+          remaining_items: remainingItems,
+          converted_by: convertedBy
+        })
+      } catch (dbErr) {
+        console.warn('[convert-hsb-to-hso] Log notice:', dbErr.message)
+      }
+
+      return res.json({
+        s: true,
+        message: `Berhasil memecah ${selectedItems.length} item ke ${hsoNumber}. Sisa ${remainingItems.length} item tetap tersimpan di ${hsbNumber}.`,
+        conversionType: 'PARTIAL',
+        hsoNumber,
+        hsoId: finalHsoId,
+        remainingCount: remainingItems.length
+      })
+    }
+
+  } catch (err) {
+    console.error('[convert-hsb-to-hso] Error:', err.message)
+    return res.json({ s: false, error: err.message })
   }
 })
 
