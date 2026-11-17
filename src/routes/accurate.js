@@ -1132,4 +1132,27 @@ router.post(['/convert-hsb-to-hso'], requireProxyKey, async (req, res) => {
   }
 })
 
+// ─── 21. RESOLVE SO TRACKING LINK ───────────────────────────────────────────
+router.post(['/resolve-tracking-link', '/tracking-link'], requireProxyKey, async (req, res) => {
+  const { code } = req.body || {}
+  if (!code) return res.json({ s: false, error: 'Tracking code wajib dikirim!' })
+
+  try {
+    const { data, error } = await supabase
+      .from('so_tracking_links')
+      .select('so_id, unique_code, is_active')
+      .eq('unique_code', String(code).trim())
+      .maybeSingle()
+
+    if (error || !data) {
+      return res.json({ s: false, error: 'Link tracking tidak ditemukan atau tidak aktif' })
+    }
+
+    return res.json({ s: true, d: data })
+  } catch (err) {
+    console.error('[resolve-tracking-link] Error:', err.message)
+    return res.json({ s: false, error: err.message })
+  }
+})
+
 module.exports = router
