@@ -342,15 +342,28 @@ router.post(['/list-po', '/accurate-list-po', '/list-all-po', '/accurate-list-al
 
 // ─── 7. TRACKING SALES ORDER ────────────────────────────────────────────────
 router.post(['/list-tracking-so', '/accurate-list-tracking-so'], requireProxyKey, async (req, res) => {
-  const { fields, sort = 'transDate|desc', filterNumber } = req.body || {}
-  const fieldsParam = fields || 'id,number,transDate,customer,statusName,percentShipped'
+  const { fields, sort = 'transDate|desc', filterNumber, page = 1, pageSize = 50 } = req.body || {}
+  const fieldsParam = fields || 'id,number,transDate,customer,statusName,percentShipped,detailItem'
 
   try {
-    let url = `${BASE_API}/accurate/api/sales-order/list.do?fields=${fieldsParam}&sp.page=1&sp.pageSize=100&sp.sort=${sort}`
+    let url = `${BASE_API}/accurate/api/sales-order/list.do?fields=${fieldsParam}&sp.page=${page}&sp.pageSize=${pageSize}&sp.sort=${sort}`
     if (filterNumber) url += `&filter.number.op=EQUAL&filter.number.val=${encodeURIComponent(filterNumber)}`
 
-    const response = await axios.get(url, { headers: buildHeaders(), timeout: 15000 })
-    return res.json({ s: true, d: response.data?.d || [] })
+    const response = await axios.get(url, { headers: buildHeaders(), timeout: 25000 })
+    const json = response.data
+    const totalCount = json?.sp?.rowCount || 0
+    const totalPages = Math.ceil(totalCount / (json?.sp?.pageSize || pageSize)) || 1
+
+    return res.json({
+      s: true,
+      d: json?.d || [],
+      pagination: {
+        page: json?.sp?.page || page,
+        pageSize: json?.sp?.pageSize || pageSize,
+        total: totalCount,
+        totalPages: totalPages
+      }
+    })
   } catch (err) {
     console.error('[list-tracking-so] Error:', err.message)
     return res.json({ s: false, error: err.message })
